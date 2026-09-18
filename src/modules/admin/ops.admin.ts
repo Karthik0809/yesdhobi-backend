@@ -85,6 +85,18 @@ adminOpsRouter.post(
 // Support tickets
 // ---------------------------------------------------------------------------
 
+/** Accept either the cuid or the human number (TKT-1001) so the panel can use display ids. */
+async function ticketByKey(key: string) {
+  const t = await prisma.supportTicket.findFirst({ where: { OR: [{ id: key }, { ticketNumber: key.toUpperCase() }] } });
+  if (!t) throw notFound('Ticket');
+  return t;
+}
+async function payoutIdByKey(key: string) {
+  const p = await prisma.payout.findFirst({ where: { OR: [{ id: key }, { payoutNumber: key.toUpperCase() }] }, select: { id: true } });
+  if (!p) throw notFound('Payout');
+  return p.id;
+}
+
 const ticketSerialize = (t: Prisma.SupportTicketGetPayload<{ include: typeof ticketInclude }>) => ({
   ...t,
   by: t.createdBy.name,
@@ -148,9 +160,9 @@ adminOpsRouter.post(
 adminOpsRouter.get(
   '/tickets/:id',
   asyncHandler(async (req, res) => {
-    const t = await prisma.supportTicket.findUnique({ where: { id: req.params.id }, include: ticketInclude });
-    if (!t) throw notFound('Ticket');
-    res.json(ticketSerialize(t));
+    const { id } = await ticketByKey(req.params.id!);
+    const t = await prisma.supportTicket.findUnique({ where: { id }, include: ticketInclude });
+    res.json(ticketSerialize(t!));
   }),
 );
 
@@ -158,8 +170,7 @@ adminOpsRouter.post(
   '/tickets/:id/reply',
   asyncHandler(async (req, res) => {
     const { text } = parseBody(z.object({ text: z.string().min(1).max(2000) }), req.body);
-    const t = await prisma.supportTicket.findUnique({ where: { id: req.params.id } });
-    if (!t) throw notFound('Ticket');
+    const t = await ticketByKey(req.params.id!);
     const message = await prisma.ticketMessage.create({ data: { ticketId: t.id, senderId: req.user!.id, senderName: req.user!.name, text, isStaff: true } });
     await prisma.supportTicket.update({ where: { id: t.id }, data: { status: t.status === 'OPEN' ? 'IN_PROGRESS' : t.status, assignedToId: t.assignedToId ?? req.user!.id } });
     realtime.toUser(t.createdById, 'ticket:message', { ticketId: t.id, message });
@@ -173,7 +184,7 @@ adminOpsRouter.patch(
   asyncHandler(async (req, res) => {
     const b = parseBody(z.object({ status: z.enum(['OPEN', 'IN_PROGRESS', 'RESOLVED']).optional(), priority: z.enum(['HIGH', 'MEDIUM', 'LOW']).optional(), assignedToId: z.string().nullable().optional() }), req.body);
     const t = await prisma.supportTicket.update({
-      where: { id: req.params.id },
+      where: { id: (await ticketByKey(req.params.id!)).id },
       data: compact({ ...b, resolvedAt: b.status === 'RESOLVED' ? new Date() : b.status ? null : undefined }),
       include: ticketInclude,
     });
@@ -229,8 +240,9 @@ adminOpsRouter.post(
   '/payouts/:id/process',
   asyncHandler(async (req, res) => {
     const { reference } = parseBody(z.object({ reference: z.string().optional() }), req.body ?? {});
-    await settlePayout(req.params.id!, 'PROCESSED', { reference });
-    res.json(serializePayout((await prisma.payout.findUnique({ where: { id: req.params.id }, include: payoutInclude }))!));
+    const id = await payoutIdByKey(req.params.id!);
+    await settlePayout(id, 'PROCESSED', { reference });
+    res.json(serializePayout((await prisma.payout.findUnique({ where: { id }, include: payoutInclude }))!));
   }),
 );
 
@@ -238,8 +250,9 @@ adminOpsRouter.post(
   '/payouts/:id/fail',
   asyncHandler(async (req, res) => {
     const { reason } = parseBody(z.object({ reason: z.string().min(2) }), req.body);
-    await settlePayout(req.params.id!, 'FAILED', { failureReason: reason });
-    res.json(serializePayout((await prisma.payout.findUnique({ where: { id: req.params.id }, include: payoutInclude }))!));
+    const id = await payoutIdByKey(req.params.id!);
+    await settlePayout(id, 'FAILED', { failureReason: reason });
+    res.json(serializePayout((await prisma.payout.findUnique({ where: { id }, include: payoutInclude }))!));
   }),
 );
 
